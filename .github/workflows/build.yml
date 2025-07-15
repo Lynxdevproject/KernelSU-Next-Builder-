@@ -1,0 +1,112 @@
+name: Universal Kernel Builder + KernelSU-Next
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_source:
+        description: '🔗 URL kernel source'
+        required: true
+        default: 'https://github.com/lynxdevproject/kernel-begonia'
+      kernel_branch:
+        description: '🌿 Branch kernel source'
+        required: true
+        default: 'main'
+      defconfig:
+        description: '🧪 Kernel defconfig'
+        required: true
+        default: 'begonia_user_defconfig'
+      anykernel:
+        description: '📦 Use AnyKernel3 packaging?'
+        required: true
+        type: boolean
+        default: true
+      anykernel_repo:
+        description: '🌐 URL AnyKernel3 repo'
+        required: false
+        default: 'https://github.com/osm0sis/AnyKernel3.git'
+      anykernel_branch:
+        description: '🌿 Branch of AnyKernel3'
+        required: false
+        default: 'master'
+      zip_name:
+        description: '📝 Output ZIP base name'
+        required: false
+        default: 'ReogKernelSU'
+      developer:
+        description: '👤 Developer name/ID'
+        required: false
+        default: 'lynx@workspace'
+      enable_kernelsu_next:
+        description: '🔘 Enable KernelSU-Next patch?'
+        required: true
+        type: boolean
+        default: false
+
+jobs:
+  build-kernel:
+    runs-on: ubuntu-latest
+    env:
+      TZ: Asia/Jakarta
+      OUT_DIR: out
+
+    steps:
+      - name: 🧰 Setup Toolchain
+        run: |
+          git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9 aarch64-linux-android-4.9
+          git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9 arm-linux-androideabi-4.9
+          mkdir clang && curl -s https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android14-dev/clang-r487747c.tar.gz -RLO && tar -C clang/ -xf clang-*.tar.gz
+
+      - name: ⏱️ Pull Kernel Source
+        run: |
+          git clone --depth=1 ${{ github.event.inputs.kernel_source }} -b ${{ github.event.inputs.kernel_branch }} kernel-source
+
+      - name: 🧙 Inject KernelSU-Next
+        if: ${{ github.event.inputs.enable_kernelsu_next }}
+        run: |
+          git clone --depth=1 https://github.com/KernelSU/KernelSU.git
+          bash KernelSU/tools/init_kernelsu.sh kernel-source
+
+      - name: ⚙️ Build Kernel
+        run: |
+          export KBUILD_BUILD_USER="${{ github.event.inputs.developer }}"
+          export KBUILD_BUILD_HOST="workspace"
+          export PATH=$GITHUB_WORKSPACE/clang/bin:${PATH}
+          args="ARCH=arm64 \
+                LLVM=1 \
+                LLVM_IAS=1 \
+                O=../out \
+                CLANG_TRIPLE=aarch64-linux-gnu- \
+                CROSS_COMPILE=$GITHUB_WORKSPACE/aarch64-linux-android-4.9/bin/aarch64-linux-android- \
+                CROSS_COMPILE_ARM32=$GITHUB_WORKSPACE/arm-linux-androideabi-4.9/bin/arm-linux-androideabi-"
+          cd kernel-source
+          make ${args} ${{ github.event.inputs.defconfig }}
+          make -j$(nproc) ${args}
+
+      - name: 📦 Package with AnyKernel3
+        if: ${{ github.event.inputs.anykernel }}
+        run: |
+          git clone --depth=1 -b "${{ github.event.inputs.anykernel_branch }}" "${{ github.event.inputs.anykernel_repo }}" AnyKernel3
+          rm -rf AnyKernel3/.git* AnyKernel3/LICENSE AnyKernel3/README.md
+          IMG_PATH="out/arch/arm64/boot"
+          for img in Image.gz-dtb Image-dtb Image.gz Image; do
+            if [[ -f $IMG_PATH/$img ]]; then
+              cp $IMG_PATH/$img AnyKernel3/$img
+              break
+            fi
+          done
+          if [[ -f $IMG_PATH/dtbo.img ]]; then
+            cp $IMG_PATH/dtbo.img AnyKernel3/dtbo.img
+          fi
+          DATE=$(date +'%Y-%m-%d_%H-%M')
+          ZIP_NAME="${{ github.event.inputs.zip_name }}-${{ github.event.inputs.developer }}-${DATE}.zip"
+          cd AnyKernel3
+          zip -r "${ZIP_NAME}" *
+
+      - name: ☁️ Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Kernel-${{ github.event.inputs.developer }}
+          path: |
+            AnyKernel3/*.zip
+            out/arch/arm64/boot/Image*
+            out/arch/arm64/boot/dtbo.img
